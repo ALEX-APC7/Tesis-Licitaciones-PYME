@@ -9,20 +9,22 @@ import ssl
 import sys
 
 # ==============================================================================
-# 0. PARCHE MAESTRO DE COMPATIBILIDAD (PARA RENDER)
+# 0. PARCHE MAESTRO DE COMPATIBILIDAD PRO (SKLEARN 1.5+ vs MODELO ANTIGUO)
 # ==============================================================================
 import sklearn.compose._column_transformer
 import sklearn.impute._base
 
-# Parche 1: Estructura de Columnas
+# 1. Parche para ColumnTransformer
 class _RemainderColsList(list):
     pass
 sklearn.compose._column_transformer._RemainderColsList = _RemainderColsList
-sys.modules['sklearn.compose._column_transformer']._RemainderColsList = _RemainderColsList
+if 'sklearn.compose._column_transformer' in sys.modules:
+    sys.modules['sklearn.compose._column_transformer']._RemainderColsList = _RemainderColsList
 
-# Parche 2: Compatibilidad de tipos en Imputador (Error 'PL' y dtypes)
+# 2. Parche para SimpleImputer (Compatibilidad con dtypes de texto 'PL', etc.)
 def get_fill_dtype(self):
     return getattr(self, "dtype", np.object_)
+
 sklearn.impute._base.SimpleImputer._fill_dtype = property(get_fill_dtype)
 
 # ==============================================================================
@@ -49,7 +51,7 @@ def membership_triangular(x, a, b, c):
     return max(min((x - a) / (b - a), (c - x) / (c - b)), 0) if b != a and c != b else 0.0
 
 # ==============================================================================
-# 2. CARGA DE DATOS (GOOGLE DRIVE + JOBIT)
+# 2. CARGA DE DATOS (GOOGLE DRIVE + BYPASS SSL)
 # ==============================================================================
 MAP_CONTRATO = {'W': 'Obras', 'U': 'Suministros', 'S': 'Servicios'}
 MAP_PROCEDIMIENTO = {'OPE': 'Abierto', 'RES': 'Restringido', 'NEG': 'Negociado', 'COMP': 'Competitivo', 'OTH': 'Otro'}
@@ -72,13 +74,13 @@ def cargar_cerebro():
     
     try:
         if not os.path.exists(NOMBRE_LOCAL):
-            with st.spinner('Descargando base de datos inteligente...'):
+            with st.spinner('Conectando con Google Drive para descargar base de datos...'):
                 context = ssl._create_unverified_context()
                 with urllib.request.urlopen(URL_DESCARGA, context=context) as response, open(NOMBRE_LOCAL, 'wb') as out_file:
                     out_file.write(response.read())
         return joblib.load(NOMBRE_LOCAL)
     except Exception as e:
-        st.error(f"🚨 Error en la descarga del cerebro: {e}")
+        st.error(f"🚨 Error crítico de carga: {e}")
         return None
 
 sistema = cargar_cerebro()
@@ -110,6 +112,8 @@ col_panel, col_result = st.columns([1, 1.5], gap="large")
 
 with col_panel:
     st.subheader("1. Datos del Proyecto")
+    
+    st.markdown("##### 💶 Variable Económica")
     valor_euro = st.number_input("Valor de tu Oferta (€)", min_value=0.0, value=150000.0, step=5000.0, on_change=resetear_analisis)
     num_ofertas = st.number_input("Competencia Estimada (Nº Empresas)", min_value=1, value=3, on_change=resetear_analisis)
 
@@ -122,6 +126,7 @@ with col_panel:
     tipo_entidad = st.selectbox("Entidad", options=['1', '3', '6', '8', 'Z'], format_func=lambda x: MAP_ENTIDAD.get(x), on_change=resetear_analisis)
     actividad = st.selectbox("Actividad", options=list(MAP_ACTIVIDAD.keys()), format_func=lambda x: MAP_ACTIVIDAD.get(x), on_change=resetear_analisis)
 
+    st.markdown("##### 🏢 Tu Empresa")
     empresa = st.text_input("Nombre del Licitante", placeholder="Ej: Mi Empresa S.A.", on_change=resetear_analisis)
 
     st.markdown("---")
@@ -137,24 +142,14 @@ if st.session_state['analisis_realizado']:
         if 'resultado_base' not in st.session_state:
             with st.spinner('Procesando datos y aplicando lógica difusa...'):
                 cpv_input = cpv_code.strip()
-                promedio_precio_sector = None
-                competencia_total_modelo = None 
-
-                posibles_claves = [cpv_input]
-                if cpv_input.isdigit(): posibles_claves.append(int(cpv_input))
-                
-                for k in posibles_claves:
-                    if k in ref_promedio_precio: promedio_precio_sector = ref_promedio_precio[k]; break
-                for k in posibles_claves:
-                    if k in ref_total_licitaciones: competencia_total_modelo = ref_total_licitaciones[k]; break
-
-                if promedio_precio_sector is None: promedio_precio_sector = valor_euro 
-                if competencia_total_modelo is None: competencia_total_modelo = 10 
+                promedio_precio_sector = ref_promedio_precio.get(cpv_input, ref_promedio_precio.get(int(cpv_input) if cpv_input.isdigit() else None, valor_euro))
+                competencia_media_grafico = ref_promedio_competidores.get(cpv_input, ref_promedio_competidores.get(int(cpv_input) if cpv_input.isdigit() else None, 5.0))
+                competencia_total_modelo = ref_total_licitaciones.get(cpv_input, ref_total_licitaciones.get(int(cpv_input) if cpv_input.isdigit() else None, 10))
 
                 historia = float(ref_participacion.get(empresa, 0))
                 ratio_valor = float(valor_euro / (promedio_precio_sector if promedio_precio_sector != 0 else 1))
 
-                # 4.2 MACHINE LEARNING CON TIPOS FORZADOS PARA EVITAR ERROR 'PL'
+                # 4.2 ML CON SEGURIDAD DE TIPOS PARA 'PL'
                 input_df = pd.DataFrame({
                     'Valor_Estimado_EUR': [float(valor_euro)], 
                     'Num_Ofertas_Recibidas': [float(num_ofertas)],
@@ -193,16 +188,21 @@ if st.session_state['analisis_realizado']:
 
                 if mu_precio_riesgo > 0.2:
                     penalizacion_total += 0.15
-                    mensajes_explicativos.append("💰 **Precio:** Fuera del rango promedio (-15%).")
+                    mensajes_explicativos.append("💰 **Precio:** Tu oferta está por encima del promedio del sector (-15%).")
 
                 prob_final_fuzzy = max(0.01, min(0.99, prob_ml_raw - penalizacion_total))
                 
                 st.session_state['resultado_base'] = prob_final_fuzzy
                 st.session_state['mensajes_base'] = mensajes_explicativos
-                st.session_state['metricas_base'] = {'historia': historia, 'ratio': ratio_valor, 'competencia': num_ofertas, 'promedio_sector': promedio_precio_sector, 'penalizacion': penalizacion_total}
+                st.session_state['metricas_base'] = {
+                    'historia': historia, 'ratio': ratio_valor, 'competencia': num_ofertas, 
+                    'promedio_sector': promedio_precio_sector, 'penalizacion': penalizacion_total,
+                    'comp_media_grafico': competencia_media_grafico
+                }
 
-        # VISUALIZACIÓN
+        # --- PARTE 2: VISUALIZACIÓN ---
         prob_base = st.session_state['resultado_base']
+        msgs = st.session_state['mensajes_base']
         mets = st.session_state['metricas_base']
 
         if prob_base > 0.5: st.success(f"### ✅ PROBABILIDAD DE ÉXITO: {prob_base:.2%}")
@@ -214,7 +214,7 @@ if st.session_state['analisis_realizado']:
         k2.metric("Ratio Precio", f"{mets['ratio']:.2f}x")
         k3.metric("Competencia", f"{int(mets['competencia'])} empresas")
 
-        # SIMULADOR
+        # --- PARTE 3: SIMULADOR DE DESCUENTO ---
         st.markdown("---")
         st.subheader("💡 Simulador de Competitividad")
         with st.container(border=True):
@@ -228,6 +228,33 @@ if st.session_state['analisis_realizado']:
             cs2.metric("Mejora Probabilidad", f"+{beneficio_pct*100:.1f}%")
             cs3.metric("Nueva Probabilidad", f"{prob_simulada:.2%}", delta=f"{(prob_simulada - prob_base):+.2%}")
 
-        with st.expander("📝 Factores de Riesgo Detectados", expanded=True):
-            for msg in st.session_state['mensajes_base']: st.markdown(f"- {msg}")
-            st.caption(f"Ajuste total aplicado: -{mets['penalizacion']*100:.1f}%")
+        # --- PARTE 4: BENCHMARKING DE MERCADO ---
+        st.markdown("#### 📊 Benchmarking de Mercado")
+        st.caption(f"Datos basados en histórico real del CPV {cpv_code}")
+        
+        g1, g2 = st.columns(2)
+        with g1:
+            fig_p = go.Figure(go.Bar(
+                x=['Tu Oferta', 'Promedio Sector'], 
+                y=[valor_euro, mets['promedio_sector']], 
+                marker_color=['#00CC96' if valor_euro <= mets['promedio_sector'] else '#EF553B', '#636EFA'], 
+                text=[f"€{valor_euro:,.0f}", f"€{mets['promedio_sector']:,.0f}"], textposition='auto'
+            ))
+            fig_p.update_layout(title="Competitividad Económica", height=300, margin=dict(t=30,b=0))
+            st.plotly_chart(fig_p, use_container_width=True)
+
+        with g2:
+            fig_c = go.Figure(go.Bar(
+                x=['Competencia Actual', 'Promedio Histórico'], 
+                y=[num_ofertas, mets['comp_media_grafico']], 
+                marker_color=['#00CC96', '#AB63FA'], 
+                text=[f"{int(num_ofertas)}", f"{mets['comp_media_grafico']:.1f}"], textposition='auto'
+            ))
+            fig_c.update_layout(title="Intensidad Competitiva (Nº Empresas)", height=300, margin=dict(t=30,b=0))
+            st.plotly_chart(fig_c, use_container_width=True)
+
+        with st.expander("📝 Factores de Riesgo Detectados", expanded=False):
+            if not msgs: st.success("✅ Perfil altamente competitivo.")
+            else:
+                for msg in msgs: st.markdown(f"- {msg}")
+            st.caption(f"Ajuste total aplicado por lógica difusa: -{mets['penalizacion']*100:.1f}%")
