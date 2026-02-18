@@ -117,7 +117,7 @@ ref_promedio_competidores = sistema.get('ref_promedio_competidores', {})
 # ==============================================================================
 with st.sidebar:
     st.title("🏛️ Menú Principal")
-    menu = st.radio("Seleccione Sección:", ["Simulador de Viabilidad", "Dashboard de Mercado", "Auditoría Técnica"])
+    menu = st.radio("Seleccione Sección:", ["🚀 Simulador de Viabilidad", "📊 Dashboard de Mercado", "⚙️ Auditoría Técnica"])
     st.divider()
     st.caption("Tesis: Ingeniería en Tecnologías de la Información")
 
@@ -164,7 +164,7 @@ if menu == "🚀 Simulador de Viabilidad":
         st.markdown("##### 🏢 Tu Empresa")
         empresa = st.text_input("Nombre del Licitante", placeholder="Ej: Mi Empresa S.A.", on_change=resetear_analisis)
         st.markdown("---")
-        btn_calcular = st.button("Calcular Viabilidad", type="primary", use_container_width=True, on_click=lambda: st.session_state.update({'analisis_realizado': True}))
+        btn_calcular = st.button("🚀 Calcular Viabilidad", type="primary", use_container_width=True, on_click=lambda: st.session_state.update({'analisis_realizado': True}))
 
     if st.session_state['analisis_realizado']:
         with col_result:
