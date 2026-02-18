@@ -9,23 +9,23 @@ import ssl
 import sys
 
 # ==============================================================================
-# 0. PARCHE MAESTRO DE COMPATIBILIDAD (SKLEARN 1.5+ vs MODELO ANTIGUO)
+# 0. PARCHE MAESTRO DE COMPATIBILIDAD PRO (SKLEARN 1.5+ vs MODELO ANTIGUO)
 # ==============================================================================
 import sklearn.compose._column_transformer
 import sklearn.impute._base
 
-# 1. Parche para ColumnTransformer (Error _RemainderColsList)
+# 1. Parche para ColumnTransformer (Estructura interna)
 class _RemainderColsList(list):
     pass
 sklearn.compose._column_transformer._RemainderColsList = _RemainderColsList
 if 'sklearn.compose._column_transformer' in sys.modules:
     sys.modules['sklearn.compose._column_transformer']._RemainderColsList = _RemainderColsList
 
-# 2. Parche para SimpleImputer (Error _fill_dtype)
+# 2. Parche para SimpleImputer (Compatibilidad con dtypes de texto 'PL', etc.)
 def get_fill_dtype(self):
-    return getattr(self, "dtype", np.float64)
+    # Forzamos a que acepte objetos (strings) si no encuentra el tipo numérico
+    return getattr(self, "dtype", np.object_)
 
-# Inyectamos la propiedad para que el modelo encuentre el atributo faltante
 sklearn.impute._base.SimpleImputer._fill_dtype = property(get_fill_dtype)
 
 # ==============================================================================
@@ -127,25 +127,37 @@ if st.session_state['analisis_realizado']:
         st.subheader("2. Resultados del Análisis")
         
         if 'resultado_base' not in st.session_state:
-            with st.spinner('Procesando predicción...'):
+            with st.spinner('Procesando predicción con motor híbrido...'):
                 cpv_input = cpv_code.strip()
                 promedio_sector = ref_promedio_precio.get(cpv_input, ref_promedio_precio.get(int(cpv_input) if cpv_input.isdigit() else None, valor_euro))
                 historia = ref_participacion.get(empresa, 0)
                 ratio_valor = valor_euro / (promedio_sector if promedio_sector != 0 else 1)
                 comp_total = ref_total_licitaciones.get(cpv_input, 10)
 
+                # CONSTRUCCIÓN DEL DATAFRAME CON TIPOS EXPLÍCITOS PARA EVITAR ERROR 'PL'
                 input_df = pd.DataFrame({
-                    'Valor_Estimado_EUR': [valor_euro], 'Num_Ofertas_Recibidas': [num_ofertas],
-                    'Participacion_Historica_Empresa': [historia], 'Competencia_Sector_CPV': [comp_total],
-                    'Ratio_Valor_Sector': [ratio_valor], 'Codigo_CPV_Sector': [cpv_code], 'ISO_COUNTRY_CODE': [pais],
-                    'TYPE_OF_CONTRACT': [tipo_contrato], 'Tipo_Procedimiento': [tipo_proc],
-                    'MAIN_ACTIVITY': [actividad], 'CRIT_CODE': [criterio], 'CAE_TYPE': [tipo_entidad]
+                    'Valor_Estimado_EUR': [float(valor_euro)],
+                    'Num_Ofertas_Recibidas': [float(num_ofertas)],
+                    'Participacion_Historica_Empresa': [float(historia)],
+                    'Competencia_Sector_CPV': [float(comp_total)],
+                    'Ratio_Valor_Sector': [float(ratio_valor)],
+                    'Codigo_CPV_Sector': [str(cpv_code)],
+                    'ISO_COUNTRY_CODE': [str(pais)],
+                    'TYPE_OF_CONTRACT': [str(tipo_contrato)],
+                    'Tipo_Procedimiento': [str(tipo_proc)],
+                    'MAIN_ACTIVITY': [str(actividad)],
+                    'CRIT_CODE': [str(criterio)],
+                    'CAE_TYPE': [str(tipo_entidad)]
                 })
                 
-                # Ejecución del modelo con parches activos
-                prob_ml = modelo.predict_proba(input_df)[0][1]
+                # Ejecución del modelo con los parches aplicados
+                try:
+                    prob_ml = modelo.predict_proba(input_df)[0][1]
+                except Exception as e:
+                    st.error(f"Error en la predicción del modelo: {e}")
+                    prob_ml = 0.5
 
-                # Reglas de Tesis
+                # Aplicación de Penalizaciones Lógicas (Requisitos de Tesis)
                 penalizacion = 0.0
                 msgs = []
                 if historia == 0: penalizacion += 0.125; msgs.append("📉 Sin historial: -12.5%")
@@ -163,4 +175,5 @@ if st.session_state['analisis_realizado']:
         
         for m in st.session_state.get('mensajes_base', []):
             st.caption(m)
+
 
