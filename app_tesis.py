@@ -6,6 +6,20 @@ import plotly.graph_objects as go
 import os
 import urllib.request
 import ssl
+import sys
+
+# ==============================================================================
+# 0. PARCHE DE COMPATIBILIDAD (SKLEARN 1.5+ vs MODELO ANTIGUO)
+# ==============================================================================
+import sklearn.compose._column_transformer
+
+# Creamos la clase que el modelo antiguo busca pero que ya no existe en la versión nueva
+class _RemainderColsList(list):
+    pass
+
+# La inyectamos en los módulos de Python antes de que el modelo intente cargar
+sklearn.compose._column_transformer._RemainderColsList = _RemainderColsList
+sys.modules['sklearn.compose._column_transformer']._RemainderColsList = _RemainderColsList
 
 # ==============================================================================
 # 1. CONFIGURACIÓN DE LA PÁGINA
@@ -18,20 +32,7 @@ st.set_page_config(
 )
 
 # ==============================================================================
-# 2. FUNCIONES MATEMÁTICAS (LÓGICA DIFUSA)
-# ==============================================================================
-def membership_trapezoidal(x, a, b, c, d):
-    if x <= a or x >= d: return 0.0
-    if a < x < b: return (x - a) / (b - a)
-    if b <= x <= c: return 1.0
-    if c < x < d: return (d - x) / (d - c)
-    return 0.0
-
-def membership_triangular(x, a, b, c):
-    return max(min((x - a) / (b - a), (c - x) / (c - b)), 0) if b != a and c != b else 0.0
-
-# ==============================================================================
-# 3. CARGA DEL CEREBRO (CONEXIÓN GOOGLE DRIVE + SOLUCIÓN ERROR 60)
+# 2. CARGA DEL CEREBRO (GOOGLE DRIVE + SSL BYPASS)
 # ==============================================================================
 MAP_CONTRATO = {'W': 'Obras', 'U': 'Suministros', 'S': 'Servicios'}
 MAP_PROCEDIMIENTO = {'OPE': 'Abierto', 'RES': 'Restringido', 'NEG': 'Negociado', 'COMP': 'Competitivo', 'OTH': 'Otro'}
@@ -48,15 +49,15 @@ MAP_PAIS = {'ES': 'España', 'FR': 'Francia', 'DE': 'Alemania', 'PL': 'Polonia',
 
 @st.cache_resource
 def cargar_cerebro():
-    # ID de tu archivo de Google Drive
+    # Tu ID de Google Drive
     ID_ARCHIVO_DRIVE = "1jOCGQTRZfNNoF1kGHD_S6OAxgUkLmC6c" 
     URL_DESCARGA = f"https://drive.google.com/uc?export=download&id={ID_ARCHIVO_DRIVE}"
     NOMBRE_LOCAL = "datos_tesis.joblib"
     
     try:
         if not os.path.exists(NOMBRE_LOCAL):
-            with st.spinner('Descargando base de datos desde Google Drive...'):
-                # SOLUCIÓN ERROR 60: Bypass de verificación SSL
+            with st.spinner('Conectando con Google Drive para descargar base de datos...'):
+                # Bypass SSL para evitar el Error 60 en Render
                 context = ssl._create_unverified_context()
                 with urllib.request.urlopen(URL_DESCARGA, context=context) as response, open(NOMBRE_LOCAL, 'wb') as out_file:
                     out_file.write(response.read())
@@ -71,7 +72,7 @@ sistema = cargar_cerebro()
 if sistema is None:
     st.stop()
 
-# Recuperar componentes del modelo
+# Recuperar componentes
 modelo = sistema['modelo_entrenado']
 ref_participacion = sistema['ref_participacion']
 ref_promedio_precio = sistema.get('ref_promedio_sector', sistema.get('ref_promedio_precio', {}))
@@ -79,7 +80,7 @@ ref_total_licitaciones = sistema.get('ref_total_licitaciones', sistema.get('ref_
 ref_promedio_competidores = sistema.get('ref_promedio_competidores', {})
 
 # ==============================================================================
-# 4. INTERFAZ GRÁFICA (PANEL IZQUIERDO)
+# 3. INTERFAZ GRÁFICA
 # ==============================================================================
 st.title("🏛️ Sistema de Viabilidad de Licitaciones")
 st.markdown("**Análisis inteligente para PYMES en el mercado europeo**")
@@ -96,7 +97,6 @@ col_panel, col_result = st.columns([1, 1.5], gap="large")
 
 with col_panel:
     st.subheader("1. Datos del Proyecto")
-    st.markdown("##### 💶 Variable Económica")
     valor_euro = st.number_input("Valor de tu Oferta (€)", min_value=0.0, value=150000.0, step=5000.0, on_change=resetear_analisis)
     num_ofertas = st.number_input("Competencia Estimada (Nº Empresas)", min_value=1, value=3, on_change=resetear_analisis)
 
@@ -109,123 +109,61 @@ with col_panel:
     tipo_entidad = st.selectbox("Entidad", options=['1', '3', '6', '8', 'Z'], format_func=lambda x: MAP_ENTIDAD.get(x), on_change=resetear_analisis)
     actividad = st.selectbox("Actividad", options=list(MAP_ACTIVIDAD.keys()), format_func=lambda x: MAP_ACTIVIDAD.get(x), on_change=resetear_analisis)
 
-    st.markdown("##### 🏢 Tu Empresa")
     empresa = st.text_input("Nombre del Licitante", placeholder="Ej: Mi Empresa S.A.", on_change=resetear_analisis)
 
-    def activar_analisis():
+    st.markdown("---")
+    if st.button("🚀 Calcular Viabilidad", type="primary", use_container_width=True):
         st.session_state['analisis_realizado'] = True
 
-    st.markdown("---")
-    btn_calcular = st.button("🚀 Calcular Viabilidad", type="primary", use_container_width=True, on_click=activar_analisis)
-
 # ==============================================================================
-# 5. MOTOR DE CÁLCULO Y RESULTADOS
+# 4. MOTOR DE CÁLCULO
 # ==============================================================================
 if st.session_state['analisis_realizado']:
     with col_result:
         st.subheader("2. Resultados del Análisis")
         
         if 'resultado_base' not in st.session_state:
-            with st.spinner('Aplicando lógica experta...'):
-                # Búsqueda de referencias por CPV
+            with st.spinner('Analizando datos históricos...'):
                 cpv_input = cpv_code.strip()
-                promedio_precio_sector = None
-                competencia_media_grafico = None
-                competencia_total_modelo = None 
-                posibles_claves = [cpv_input, int(cpv_input) if cpv_input.isdigit() else None]
-                
-                for k in posibles_claves:
-                    if k in ref_promedio_precio: promedio_precio_sector = ref_promedio_precio[k]; break
-                for k in posibles_claves:
-                    if k in ref_promedio_competidores: competencia_media_grafico = ref_promedio_competidores[k]; break
-                for k in posibles_claves:
-                    if k in ref_total_licitaciones: competencia_total_modelo = ref_total_licitaciones[k]; break
-
-                promedio_precio_sector = promedio_precio_sector if promedio_precio_sector else valor_euro
-                competencia_media_grafico = competencia_media_grafico if competencia_media_grafico else 5.0
-                competencia_total_modelo = competencia_total_modelo if competencia_total_modelo else 10
-
+                promedio_sector = ref_promedio_precio.get(cpv_input, ref_promedio_precio.get(int(cpv_input) if cpv_input.isdigit() else None, valor_euro))
                 historia = ref_participacion.get(empresa, 0)
-                ratio_valor = valor_euro / (promedio_precio_sector if promedio_precio_sector != 0 else 1)
+                ratio_valor = valor_euro / (promedio_sector if promedio_sector != 0 else 1)
+                comp_total = ref_total_licitaciones.get(cpv_input, 10)
 
-                # Predicción Random Forest
                 input_df = pd.DataFrame({
                     'Valor_Estimado_EUR': [valor_euro], 'Num_Ofertas_Recibidas': [num_ofertas],
-                    'Participacion_Historica_Empresa': [historia], 'Competencia_Sector_CPV': [competencia_total_modelo],
+                    'Participacion_Historica_Empresa': [historia], 'Competencia_Sector_CPV': [comp_total],
                     'Ratio_Valor_Sector': [ratio_valor], 'Codigo_CPV_Sector': [cpv_code], 'ISO_COUNTRY_CODE': [pais],
                     'TYPE_OF_CONTRACT': [tipo_contrato], 'Tipo_Procedimiento': [tipo_proc],
                     'MAIN_ACTIVITY': [actividad], 'CRIT_CODE': [criterio], 'CAE_TYPE': [tipo_entidad]
                 })
-                prob_ml_raw = modelo.predict_proba(input_df)[0][1]
-
-                # Aplicación de Penalizaciones Manuales
-                mensajes_explicativos = []
-                penalizacion_total = 0.0
                 
-                if historia == 0:
-                    penalizacion_total += 0.125
-                    mensajes_explicativos.append("📉 **Historial:** Sin adjudicaciones previas. Penalización: **-12.5%**.")
-                
-                if num_ofertas == 2: penalizacion_total += 0.10; mensajes_explicativos.append("👥 **Competencia:** 2 oferentes. Penalización: **-10%**.")
-                elif num_ofertas == 3: penalizacion_total += 0.20; mensajes_explicativos.append("👥 **Competencia:** 3 oferentes. Penalización: **-20%**.")
-                elif num_ofertas >= 5: penalizacion_total += 0.25; mensajes_explicativos.append("⚠️ **Saturación:** >= 5 oferentes. Penalización: **-25%**.")
+                prob_ml = modelo.predict_proba(input_df)[0][1]
 
-                if valor_euro > 1000000:
-                    penalizacion_total += 0.15
-                    mensajes_explicativos.append("💰 **Alto Valor:** Oferta mayor a 1M€. Penalización: **-15%**.")
+                # Aplicación de Penalizaciones (Hallazgos de la Tesis)
+                penalizacion = 0.0
+                msgs = []
+                if historia == 0: penalizacion += 0.125; msgs.append("📉 Sin historial previo: **-12.5%**")
+                if num_ofertas == 2: penalizacion += 0.10; msgs.append("👥 Competencia moderada: **-10%**")
+                elif num_ofertas == 3: penalizacion += 0.20; msgs.append("👥 Competencia alta: **-20%**")
+                elif num_ofertas >= 5: penalizacion += 0.25; msgs.append("⚠️ Saturación de mercado: **-25%**")
+                if valor_euro > 1000000: penalizacion += 0.15; msgs.append("💰 Barrera de alto valor: **-15%**")
 
-                prob_final = max(0.01, min(0.99, prob_ml_raw - penalizacion_total))
-                
+                prob_final = max(0.01, min(0.99, prob_ml - penalizacion))
                 st.session_state['resultado_base'] = prob_final
-                st.session_state['mensajes_base'] = mensajes_explicativos
-                st.session_state['metricas_base'] = {
-                    'historia': historia, 'ratio': ratio_valor, 'competencia': num_ofertas,
-                    'promedio_sector': promedio_precio_sector, 'penalizacion': penalizacion_total,
-                    'comp_media_grafico': competencia_media_grafico
-                }
+                st.session_state['mensajes_base'] = msgs
+                st.session_state['metricas_base'] = {'historia': historia, 'ratio': ratio_valor, 'comp': num_ofertas, 'prom_sec': promedio_sector}
 
-        # --- VISUALIZACIÓN ---
+        # --- MOSTRAR RESULTADOS ---
         prob_base = st.session_state['resultado_base']
-        msgs = st.session_state['mensajes_base']
-        mets = st.session_state['metricas_base']
-
-        if prob_base > 0.5:
-            st.success(f"### ✅ PROBABILIDAD DE ÉXITO: {prob_base:.2%}")
-        else:
-            st.error(f"### ⚠️ PROBABILIDAD DE ÉXITO: {prob_base:.2%}")
+        if prob_base > 0.5: st.success(f"### PROBABILIDAD DE ÉXITO: {prob_base:.2%}")
+        else: st.error(f"### PROBABILIDAD DE ÉXITO: {prob_base:.2%}")
         st.progress(prob_base)
-        
-        # --- SIMULADOR DE DESCUENTO ---
-        st.markdown("---")
-        st.subheader("💡 Simulador de Competitividad")
-        with st.container(border=True):
-            val_descuento = st.slider("Descuento a aplicar (%)", 0, 30, 0, key="slider_final")
-            beneficio_pct = (val_descuento * 0.01) if val_descuento <= 20 else (0.20 + (val_descuento-20)*0.002)
-            prob_simulada = max(0.01, min(0.99, prob_base + beneficio_pct))
-            
-            cs1, cs2 = st.columns(2)
-            cs1.metric("Nuevo Precio", f"€ {valor_euro * (1 - (val_descuento/100)):,.0f}")
-            cs2.metric("Nueva Probabilidad", f"{prob_simulada:.2%}", delta=f"{(prob_simulada - prob_base):+.2%}")
 
-        # --- GRÁFICOS ---
-        st.markdown("#### 📊 Comparativa de Mercado")
-        g1, g2 = st.columns(2)
-        fig_p = go.Figure(go.Bar(
-            x=['Tu Oferta', 'Media Sector'], y=[valor_euro, mets['promedio_sector']],
-            marker_color=['#EF553B' if valor_euro > mets['promedio_sector'] else '#00CC96', '#636EFA'],
-            text=[f"€{valor_euro:,.0f}", f"€{mets['promedio_sector']:,.0f}"], textposition='auto'
-        ))
-        fig_p.update_layout(height=250, margin=dict(t=20,b=0,l=0,r=0), title="Precio")
-        g1.plotly_chart(fig_p, use_container_width=True)
+        with st.expander("💡 Simulador de Estrategia", expanded=True):
+            desc = st.slider("Descuento (%)", 0, 30, 0)
+            mejora = (desc * 0.01) if desc <= 20 else (0.20 + (desc-20)*0.002)
+            st.metric("Nueva Probabilidad", f"{min(0.99, prob_base + mejora):.2%}", delta=f"{mejora:+.1%}")
 
-        fig_c = go.Figure(go.Bar(
-            x=['Actual', 'Histórica'], y=[num_ofertas, mets['comp_media_grafico']],
-            marker_color=['#AB63FA', '#FFA15A'],
-            text=[f"{num_ofertas}", f"{mets['comp_media_grafico']:.1f}"], textposition='auto'
-        ))
-        fig_c.update_layout(height=250, margin=dict(t=20,b=0,l=0,r=0), title="Nº Competidores")
-        g2.plotly_chart(fig_c, use_container_width=True)
-
-        with st.expander("📝 Factores de Riesgo", expanded=False):
-            for m in msgs: st.markdown(f"- {m}")
-            st.caption(f"Ajuste total aplicado: -{mets['penalizacion']*100:.1f}%")
+        st.markdown("#### 📊 Factores Críticos")
+        for m in st.session_state['mensajes_base']: st.caption(m)
