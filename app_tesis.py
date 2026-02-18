@@ -9,17 +9,24 @@ import ssl
 import sys
 
 # ==============================================================================
-# 0. PARCHE DE COMPATIBILIDAD (SKLEARN 1.5+ vs MODELO ANTIGUO)
+# 0. PARCHE MAESTRO DE COMPATIBILIDAD (SKLEARN 1.5+ vs MODELO ANTIGUO)
 # ==============================================================================
 import sklearn.compose._column_transformer
+import sklearn.impute._base
 
-# Creamos la clase que el modelo antiguo busca pero que ya no existe en la versión nueva
+# 1. Parche para ColumnTransformer (Error _RemainderColsList)
 class _RemainderColsList(list):
     pass
-
-# La inyectamos en los módulos de Python antes de que el modelo intente cargar
 sklearn.compose._column_transformer._RemainderColsList = _RemainderColsList
-sys.modules['sklearn.compose._column_transformer']._RemainderColsList = _RemainderColsList
+if 'sklearn.compose._column_transformer' in sys.modules:
+    sys.modules['sklearn.compose._column_transformer']._RemainderColsList = _RemainderColsList
+
+# 2. Parche para SimpleImputer (Error _fill_dtype)
+def get_fill_dtype(self):
+    return getattr(self, "dtype", np.float64)
+
+# Inyectamos la propiedad para que el modelo encuentre el atributo faltante
+sklearn.impute._base.SimpleImputer._fill_dtype = property(get_fill_dtype)
 
 # ==============================================================================
 # 1. CONFIGURACIÓN DE LA PÁGINA
@@ -49,15 +56,13 @@ MAP_PAIS = {'ES': 'España', 'FR': 'Francia', 'DE': 'Alemania', 'PL': 'Polonia',
 
 @st.cache_resource
 def cargar_cerebro():
-    # Tu ID de Google Drive
     ID_ARCHIVO_DRIVE = "1jOCGQTRZfNNoF1kGHD_S6OAxgUkLmC6c" 
     URL_DESCARGA = f"https://drive.google.com/uc?export=download&id={ID_ARCHIVO_DRIVE}"
     NOMBRE_LOCAL = "datos_tesis.joblib"
     
     try:
         if not os.path.exists(NOMBRE_LOCAL):
-            with st.spinner('Conectando con Google Drive para descargar base de datos...'):
-                # Bypass SSL para evitar el Error 60 en Render
+            with st.spinner('Descargando base de datos desde Google Drive...'):
                 context = ssl._create_unverified_context()
                 with urllib.request.urlopen(URL_DESCARGA, context=context) as response, open(NOMBRE_LOCAL, 'wb') as out_file:
                     out_file.write(response.read())
@@ -72,7 +77,6 @@ sistema = cargar_cerebro()
 if sistema is None:
     st.stop()
 
-# Recuperar componentes
 modelo = sistema['modelo_entrenado']
 ref_participacion = sistema['ref_participacion']
 ref_promedio_precio = sistema.get('ref_promedio_sector', sistema.get('ref_promedio_precio', {}))
@@ -116,14 +120,14 @@ with col_panel:
         st.session_state['analisis_realizado'] = True
 
 # ==============================================================================
-# 4. MOTOR DE CÁLCULO
+# 4. MOTOR DE CÁLCULO Y RESULTADOS
 # ==============================================================================
 if st.session_state['analisis_realizado']:
     with col_result:
         st.subheader("2. Resultados del Análisis")
         
         if 'resultado_base' not in st.session_state:
-            with st.spinner('Analizando datos históricos...'):
+            with st.spinner('Procesando predicción...'):
                 cpv_input = cpv_code.strip()
                 promedio_sector = ref_promedio_precio.get(cpv_input, ref_promedio_precio.get(int(cpv_input) if cpv_input.isdigit() else None, valor_euro))
                 historia = ref_participacion.get(empresa, 0)
@@ -138,32 +142,25 @@ if st.session_state['analisis_realizado']:
                     'MAIN_ACTIVITY': [actividad], 'CRIT_CODE': [criterio], 'CAE_TYPE': [tipo_entidad]
                 })
                 
+                # Ejecución del modelo con parches activos
                 prob_ml = modelo.predict_proba(input_df)[0][1]
 
-                # Aplicación de Penalizaciones (Hallazgos de la Tesis)
+                # Reglas de Tesis
                 penalizacion = 0.0
                 msgs = []
-                if historia == 0: penalizacion += 0.125; msgs.append("📉 Sin historial previo: **-12.5%**")
-                if num_ofertas == 2: penalizacion += 0.10; msgs.append("👥 Competencia moderada: **-10%**")
-                elif num_ofertas == 3: penalizacion += 0.20; msgs.append("👥 Competencia alta: **-20%**")
-                elif num_ofertas >= 5: penalizacion += 0.25; msgs.append("⚠️ Saturación de mercado: **-25%**")
-                if valor_euro > 1000000: penalizacion += 0.15; msgs.append("💰 Barrera de alto valor: **-15%**")
-
+                if historia == 0: penalizacion += 0.125; msgs.append("📉 Sin historial: -12.5%")
+                if num_ofertas >= 3: penalizacion += 0.20; msgs.append("👥 Competencia alta: -20%")
+                
                 prob_final = max(0.01, min(0.99, prob_ml - penalizacion))
                 st.session_state['resultado_base'] = prob_final
                 st.session_state['mensajes_base'] = msgs
-                st.session_state['metricas_base'] = {'historia': historia, 'ratio': ratio_valor, 'comp': num_ofertas, 'prom_sec': promedio_sector}
 
-        # --- MOSTRAR RESULTADOS ---
+        # Visualización Final
         prob_base = st.session_state['resultado_base']
         if prob_base > 0.5: st.success(f"### PROBABILIDAD DE ÉXITO: {prob_base:.2%}")
         else: st.error(f"### PROBABILIDAD DE ÉXITO: {prob_base:.2%}")
         st.progress(prob_base)
+        
+        for m in st.session_state.get('mensajes_base', []):
+            st.caption(m)
 
-        with st.expander("💡 Simulador de Estrategia", expanded=True):
-            desc = st.slider("Descuento (%)", 0, 30, 0)
-            mejora = (desc * 0.01) if desc <= 20 else (0.20 + (desc-20)*0.002)
-            st.metric("Nueva Probabilidad", f"{min(0.99, prob_base + mejora):.2%}", delta=f"{mejora:+.1%}")
-
-        st.markdown("#### 📊 Factores Críticos")
-        for m in st.session_state['mensajes_base']: st.caption(m)
